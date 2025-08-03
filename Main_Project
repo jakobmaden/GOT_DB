@@ -5,7 +5,7 @@ import pandas as pd
 from rapidfuzz import fuzz
 import sqlite3
 
-folder_path = 'C:\\Users\\jemad\\Downloads\\Database Project\\data_files'
+folder_path = 'C:\\data_files'
 
 
 dataframes = {}
