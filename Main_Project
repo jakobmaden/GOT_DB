@@ -147,7 +147,7 @@ for name, df in df_dict.items():
     df.to_sql(name, conn, if_exists='replace', index=False)
 
 
-conn = sqlite3.connect('gotest.db')
+conn = sqlite3.connect('asoiaf.db')
 cur  = conn.cursor()
 cur.execute("PRAGMA foreign_keys = OFF;")
 
