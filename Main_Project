@@ -21,3 +21,323 @@ for filename in os.listdir(folder_path):
             print(f"Loaded '{filename}' into DataFrame: {df_name}")
         except Exception as e:
             print(f"Failed to load '{filename}': {e}")
+
+# Make individual DFs
+df_chapters = dataframes['chapters']
+df_characters = dataframes['characters']
+df_deaths = dataframes['deaths']
+df_dialogues = dataframes['dialogues']
+df_houses = dataframes['houses']
+
+# Clean Houses
+
+df_houses= df_houses.dropna(subset=['House']).reset_index(drop=True)
+df_houses= df_houses.fillna('Unknown')
+df_houses['house_id'] = range(1, len(df_houses) + 1)
+
+# Clean chapters
+df_chapters= df_chapters.dropna(subset=['Book']).reset_index(drop=True)
+df_chapters['chapter_id'] = range(1, len(df_chapters) + 1)
+
+# Clean characters
+df_characters= df_characters.dropna(subset=['Book']).reset_index(drop=True)
+main_series = ['A Game of Thrones','A Clash of Kings','A Storm of Swords','A Feast for Crows','A Dance with Dragons']
+df_characters = df_characters[df_characters['Book'].isin(main_series)]
+df_characters['character_id'] = range(1, len(df_characters) + 1)
+#df_characters = df_characters[['character_id','Character','Forename','Surname','Old Surname','Alias','Gender','Alive?','Title','Regnal No']]
+df_characters3= df_characters.fillna('Unknown')
+
+
+# Create Books DF
+df_books = df_characters['Book'].unique()
+df_books = pd.DataFrame(df_books, columns=['Book'])
+df_books['book_id'] = range(1, len(df_books) + 1)
+
+
+
+def connect_character_ids_fuzzy(
+    df: pd.DataFrame,
+    name_col: str = 'name',
+    id_col: str = 'character_id',
+    threshold: int = 80
+) -> pd.DataFrame:
+    """
+    This function will take a long time to run.
+    """
+
+    def find_id(name: str) -> int:
+        text = str(name)
+        best_score, best_id = 0, 0
+
+        for _, row in df_characters3.iterrows():
+            alias = str(row['Alias'])
+            full  = f"{row['Forename']} {row['Surname']}".strip()
+
+            for candidate in (alias, full):
+                score = fuzz.WRatio(text, candidate)
+                if score > best_score:
+                    best_score, best_id = score, row['character_id']
+
+        return best_id if best_score >= threshold else 0
+
+    df[id_col] = df[name_col].apply(find_id)
+    return df
+
+# add character_id to deaths
+
+df_deaths = connect_character_ids_fuzzy(df_deaths, name_col='name', id_col='character_id')
+
+# add character_ids to dialogue
+
+#field_list = ['Speaker','Addressee','About Character','Mentioned Character']
+field_list = ['Speaker','Addressee']
+for field in field_list:
+    df_dialogues = connect_character_ids_fuzzy(df_dialogues, name_col=f'{field}', id_col=f'{field}_id')
+
+df_chapters = connect_character_ids_fuzzy(df_chapters, name_col='POV', id_col=f'pov_id')
+
+# function for connecting and moving fields between dataframes
+
+def map_identifier_multi(df_source, df_reference, source_cols, reference_cols, transfer_cols):
+    if len(source_cols) != len(reference_cols):
+        raise ValueError("source_cols and reference_cols must have the same length.")
+
+    df_source['__match_key__'] = df_source[source_cols].astype(str).agg('|'.join, axis=1)
+    df_reference['__match_key__'] = df_reference[reference_cols].astype(str).agg('|'.join, axis=1)
+
+    for id_col, new_col in zip(transfer_cols, transfer_cols):
+        mapping = dict(zip(df_reference['__match_key__'], df_reference[id_col]))
+        df_source[new_col] = df_source['__match_key__'].map(mapping)
+
+    df_source.drop(columns='__match_key__', inplace=True)
+    df_reference.drop(columns='__match_key__', inplace=True)
+
+
+map_identifier_multi(df_characters, df_chapters, ['Chapter Name','Book'], ['Name','Book'], ['chapter_id'])
+map_identifier_multi(df_characters, df_books, ['Book'], ['Book'], ['book_id'])
+map_identifier_multi(df_characters,df_deaths, ['character_id'], ['character_id'], ['a_game_of_thrones','a_clash_of_kings','a_storm_of_swords','allegiances'])
+map_identifier_multi(df_chapters, df_books, ['Book'], ['Book'], ['book_id'])
+map_identifier_multi(df_characters, df_houses, ['Surname'], ['House'], ['house_id'])
+df_dialogues['book_id'] = 1
+map_identifier_multi(df_dialogues, df_chapters, ['book_id','Chapter Number','Chapter Name'], ['book_id','Chapter No.','Name'], ['chapter_id'])
+
+
+df_characters = df_characters.drop(columns = ['Book','Page','Chapter Name','POV'])
+#df_deaths = df_deaths.drop(columns = ['character_id','death_year','book_of_death','death_chapter'])
+df_deaths = df_deaths[['character_id','death_year','book_of_death','death_chapter']]
+df_dialogues = df_dialogues[['Speaker_id','Addressee_id','book_id','chapter_id','Dialogue']]
+df_houses = df_houses.rename(columns={"Characters inc maiden names": "Characters_inc_maiden_names"})
+df_chapters = df_chapters.rename(columns={"Chars Introduced": "Chars_Introduced"})
+df_characters = df_characters.rename(columns={"Alive?":"Alive","Old Surname":"Old_Surname","Regnal No":"Regnal_No"})
+df_chapters = df_chapters.drop(columns = ['Book','Chapter No.','POV'])
+
+conn = sqlite3.connect('asoiaf.db')
+cur = conn.cursor()
+
+df_dict = {
+    'characters': df_characters,
+    'houses': df_houses,
+    'chapters': df_chapters,
+    'deaths': df_deaths,
+    'dialogues': df_dialogues,
+    'books': df_books
+}
+
+for name, df in df_dict.items():
+    df.to_sql(name, conn, if_exists='replace', index=False)
+
+
+conn = sqlite3.connect('gotest.db')
+cur  = conn.cursor()
+cur.execute("PRAGMA foreign_keys = OFF;")
+
+# 1 books
+cur.execute("ALTER TABLE books RENAME TO books_old;")
+cur.execute("""
+CREATE TABLE books (
+  book_id INTEGER PRIMARY KEY,
+  book TEXT
+);
+""")
+cur.execute("""
+INSERT INTO books(book_id, book)
+SELECT CAST(book_id AS INTEGER), book
+FROM books_old;
+""")
+cur.execute("DROP TABLE books_old;")
+
+# 2 houses
+cur.execute("ALTER TABLE houses RENAME TO houses_old;")
+cur.execute("""
+CREATE TABLE houses (
+  house_id INTEGER PRIMARY KEY,
+  House TEXT,
+  Full_House TEXT,
+  Seat TEXT,
+  Region TEXT,
+  Words TEXT,
+  Characters INTEGER,
+  Characters_inc_maiden_names INTEGER,
+  Alive INTEGER,
+  Dead INTEGER,
+  Unknown INTEGER,
+  Historical INTEGER
+);
+""")
+cur.execute("""
+INSERT INTO houses(
+  house_id, House, Full_House, Seat, Region, Words,
+  Characters, Characters_inc_maiden_names,
+  Alive, Dead, Unknown, Historical
+)
+SELECT 
+  CAST(house_id AS INTEGER), House, Full_House, Seat, Region, Words,
+  Characters, Characters_inc_maiden_names,
+  Alive, Dead, Unknown, Historical
+FROM houses_old;
+""")
+cur.execute("DROP TABLE houses_old;")
+
+# 3 chapters
+cur.execute("ALTER TABLE chapters RENAME TO chapters_old;")
+cur.execute("""
+CREATE TABLE chapters (
+  chapter_id INTEGER PRIMARY KEY,
+  Name TEXT,
+  Page INTEGER,
+  Chars_Introduced INTEGER,
+  pov_id INTEGER,
+  book_id INTEGER,
+  FOREIGN KEY (book_id) REFERENCES books(book_id)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL
+);
+""")
+cur.execute("""
+INSERT INTO chapters(
+  chapter_id, Name, Page, Chars_Introduced, pov_id, book_id
+)
+SELECT
+  CAST(chapter_id AS INTEGER), Name, Page, Chars_Introduced, 
+  CAST(pov_id AS INTEGER), CAST(book_id AS INTEGER)
+FROM chapters_old;
+""")
+cur.execute("DROP TABLE chapters_old;")
+
+# 4 characters
+cur.execute("ALTER TABLE characters RENAME TO characters_old;")
+cur.execute("""
+CREATE TABLE characters (
+  character_id INTEGER PRIMARY KEY,
+  Character TEXT,
+  Gender TEXT,
+  Alive TEXT,
+  Title TEXT,
+  Forename TEXT,
+  Surname TEXT,
+  Old_Surname TEXT,
+  Alias TEXT,
+  Regnal_No INTEGER,
+  chapter_id INTEGER,
+  book_id INTEGER,
+  a_game_of_thrones INTEGER,
+  a_clash_of_kings INTEGER,
+  a_storm_of_swords INTEGER,
+  allegiances TEXT,
+  house_id INTEGER,
+  FOREIGN KEY (chapter_id) REFERENCES chapters(chapter_id)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL,
+  FOREIGN KEY (house_id) REFERENCES houses(house_id)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL,
+  FOREIGN KEY (book_id) REFERENCES books(book_id)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL
+);
+""")
+cur.execute("""
+INSERT INTO characters(
+  character_id, Character, Gender, Alive, Title,
+  Forename, Surname, Old_Surname, Alias, Regnal_No,
+  chapter_id, book_id, a_game_of_thrones, 
+  a_clash_of_kings, a_storm_of_swords, allegiances, house_id
+)
+SELECT
+  CAST(character_id AS INTEGER), Character, Gender, Alive, Title,
+  Forename, Surname, Old_Surname, Alias, Regnal_No,
+  CAST(chapter_id AS INTEGER), CAST(book_id AS INTEGER),
+  a_game_of_thrones, a_clash_of_kings, a_storm_of_swords,
+  allegiances, CAST(house_id AS INTEGER)
+FROM characters_old;
+""")
+cur.execute("DROP TABLE characters_old;")
+
+# 5 dialogues
+cur.execute("ALTER TABLE dialogues RENAME TO dialogues_old;")
+cur.execute("""
+CREATE TABLE dialogues (
+  dialogue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  Speaker_id INTEGER,
+  Addressee_id INTEGER,
+  book_id INTEGER,
+  chapter_id INTEGER,
+  Dialogue TEXT,
+  FOREIGN KEY (Speaker_id) REFERENCES characters(character_id)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL,
+  FOREIGN KEY (Addressee_id) REFERENCES characters(character_id)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL,
+  FOREIGN KEY (chapter_id) REFERENCES chapters(chapter_id)
+    ON UPDATE CASCADE
+    ON DELETE CASCADE,
+  FOREIGN KEY (book_id) REFERENCES books(book_id)
+    ON UPDATE CASCADE
+    ON DELETE SET NULL
+);
+""")
+cur.execute("""
+INSERT INTO dialogues(
+  Speaker_id, Addressee_id, book_id, chapter_id, Dialogue
+)
+SELECT
+  CAST(Speaker_id AS INTEGER), 
+  CAST(Addressee_id AS INTEGER),
+  CAST(book_id AS INTEGER), 
+  CAST(chapter_id AS INTEGER),
+  Dialogue
+FROM dialogues_old;
+""")
+cur.execute("DROP TABLE dialogues_old;")
+
+# 6 deaths
+cur.execute("ALTER TABLE deaths RENAME TO deaths_old;")
+cur.execute("""
+CREATE TABLE deaths (
+  death_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  character_id INTEGER,
+  death_year INTEGER,
+  book_of_death INTEGER,
+  death_chapter INTEGER,
+  FOREIGN KEY (character_id) REFERENCES characters(character_id)
+    ON UPDATE CASCADE
+    ON DELETE CASCADE
+);
+""")
+cur.execute("""
+INSERT INTO deaths(
+  character_id, death_year, book_of_death, death_chapter
+)
+SELECT
+  CAST(character_id AS INTEGER),
+  CAST(death_year AS INTEGER),
+  CAST(book_of_death AS INTEGER),
+  CAST(death_chapter AS INTEGER)
+FROM deaths_old;
+""")
+cur.execute("DROP TABLE deaths_old;")
+
+cur.execute("PRAGMA foreign_keys = ON;")
+conn.commit()
+#conn.close()
