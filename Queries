@@ -1,0 +1,54 @@
+cur.execute("""
+    SELECT
+      b.book,
+      COUNT(c.character_id) AS character_count
+    FROM books AS b
+    LEFT JOIN characters AS c
+      ON b.book_id = c.book_id
+    GROUP BY
+      b.book
+    ORDER BY
+      character_count DESC;
+""")
+
+rows = cur.fetchall()
+for row in rows:
+    print(row)
+
+
+
+cur.execute("""
+    SELECT
+      b.book,
+      COUNT(d.death_id) AS deaths_count
+    FROM books AS b
+    LEFT JOIN deaths AS d
+      ON b.book_id = d.book_of_death
+    GROUP BY
+      b.book
+    ORDER BY
+      deaths_count DESC;
+""")
+
+rows = cur.fetchall()
+for row in rows:
+    print(row)
+
+
+cur.execute("""
+    SELECT
+      h.House,
+      COUNT(c.character_id) AS character_count
+    FROM houses AS h
+    LEFT JOIN characters AS c
+      ON h.house_id = c.house_id
+    GROUP BY
+      h.House
+    ORDER BY
+      character_count DESC
+      LIMIT 10;
+""")
+
+rows = cur.fetchall()
+for row in rows:
+    print(row)
